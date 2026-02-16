@@ -112,9 +112,17 @@ const humanizeReason = (reason, i18n) => {
  * @param {number} maxRetries - Maximum retry attempts
  * @returns {Object|null} - { analysis, model } or null on failure
  */
-const callLLMWithRetry = async (systemPrompt, userPrompt, maxRetries = 3) => {
+const callLLMWithRetry = async (systemPrompt, userPrompt, { imageUrl, maxRetries = 3 } = {}) => {
   let lastError = null
   let modelIndex = 0
+
+  // Build user message content: text-only or multimodal
+  const userContent = imageUrl
+    ? [
+        { type: 'text', text: userPrompt },
+        { type: 'image_url', image_url: { url: imageUrl } }
+      ]
+    : userPrompt
 
   for (let attempt = 0; attempt < maxRetries; attempt++) {
     const model = FALLBACK_MODELS[Math.min(modelIndex, FALLBACK_MODELS.length - 1)]
@@ -124,7 +132,7 @@ const callLLMWithRetry = async (systemPrompt, userPrompt, maxRetries = 3) => {
         model,
         messages: [
           { role: 'system', content: systemPrompt },
-          { role: 'user', content: userPrompt }
+          { role: 'user', content: userContent }
         ],
         temperature: 1.0,
         reasoning_effort: 'low',
@@ -441,6 +449,11 @@ const quickRiskAssessment = (ctx) => {
   // 3. Sticker/GIF only (rarely spam)
   if ((message.sticker || message.animation) && !text) {
     trustSignals.push('media_only')
+  }
+
+  // 3a. Photo from new user with no trust signals - ensure it reaches moderation/LLM
+  if (message.photo && !trustSignals.length) {
+    signals.push('has_photo')
   }
 
   // 3b. Emoji-only text (rarely spam, commonly used in conversations)
@@ -989,16 +1002,11 @@ const runQuickAssessmentPhase = (ctx) => {
  * PHASE 2: OpenAI Moderation Check
  * @returns {Object|null} Result if content flagged, null to continue
  */
-const runModerationPhase = async (ctx, messageText, quickAssessment, userBio, userAvatarUrl) => {
+const runModerationPhase = async (ctx, messageText, quickAssessment, userBio, userAvatarUrl, messagePhotoUrl) => {
   if (quickAssessment.risk === 'low') {
     spamLog.debug('Skipping OpenAI moderation for low-risk message')
     return null
   }
-
-  const messagePhoto = ctx.message && ctx.message.photo && ctx.message.photo[0]
-  const messagePhotoUrl = messagePhoto && messagePhoto.file_id
-    ? await getMessagePhotoUrl(ctx, messagePhoto)
-    : null
 
   const textToModerate = [messageText, userBio].filter(Boolean).join('\n\n')
   const moderationPromises = []
@@ -1305,7 +1313,7 @@ const buildLLMContext = (ctx, userContext, groupDescription, userBio) => {
 /**
  * PHASE 5: LLM Analysis
  */
-const runLLMPhase = async (messageText, ctx, userContext, groupSettings, groupDescription, userBio, boosts, embedding, features) => {
+const runLLMPhase = async (messageText, ctx, userContext, groupSettings, groupDescription, userBio, boosts, embedding, features, messagePhotoUrl) => {
   const { candidateBoost } = boosts
 
   // Rate limit LLM calls per group
@@ -1335,13 +1343,14 @@ spamScore (0.0-1.0) = probability this is spam:
 Rules:
 - offensive ≠ spam (trolls annoy, spammers advertise)
 - Trust users with message history and reputation
-- reason = short explanation for group admins`
+- reason = short explanation for group admins
+- If an image is attached, analyze its visual content for spam indicators (promotional text, QR codes, crypto logos, contact info overlays, adult content ads)`
 
   const userPrompt = `MESSAGE: ${messageText}
 
 CONTEXT: ${contextInfo.join(' | ')}`
 
-  const llmResult = await callLLMWithRetry(systemPrompt, userPrompt)
+  const llmResult = await callLLMWithRetry(systemPrompt, userPrompt, { imageUrl: messagePhotoUrl })
   if (!llmResult) {
     spamLog.warn('LLM failed, using safe fallback')
     return {
@@ -1424,17 +1433,28 @@ const checkSpam = async (messageText, ctx, groupSettings) => {
     const { result: qaResult, quickAssessment } = runQuickAssessmentPhase(ctx)
     if (qaResult) return qaResult
 
+    // Fetch photo URL once (largest size) for moderation + LLM
+    const messagePhoto = ctx.message && ctx.message.photo && ctx.message.photo[ctx.message.photo.length - 1]
+    const messagePhotoUrlPromise = messagePhoto && messagePhoto.file_id
+      ? getMessagePhotoUrl(ctx, messagePhoto)
+      : Promise.resolve(null)
+
     // Fetch additional context in parallel
-    const [userAvatarUrl, userChatInfo, groupDescription] = await Promise.all([
+    const [userAvatarUrl, userChatInfo, groupDescription, messagePhotoUrl] = await Promise.all([
       getUserProfilePhotoUrl(ctx),
       getUserChatInfo(ctx),
-      getGroupDescription(ctx)
+      getGroupDescription(ctx),
+      messagePhotoUrlPromise
     ])
     const userBio = userChatInfo.bio
     const userRating = userChatInfo.rating
 
+    if (messagePhoto && !messagePhotoUrl) {
+      modLog.warn({ fileId: messagePhoto.file_id }, 'Failed to fetch message photo URL, continuing without image')
+    }
+
     // PHASE 2: OpenAI Moderation
-    const modResult = await runModerationPhase(ctx, messageText, quickAssessment, userBio, userAvatarUrl)
+    const modResult = await runModerationPhase(ctx, messageText, quickAssessment, userBio, userAvatarUrl, messagePhotoUrl)
     if (modResult) return modResult
 
     // Build user context
@@ -1458,7 +1478,8 @@ const checkSpam = async (messageText, ctx, groupSettings) => {
       userBio,
       { candidateBoost },
       embedding,
-      features
+      features,
+      messagePhotoUrl
     )
   } catch (error) {
     spamLog.error({ err: error }, 'Error during spam check')
