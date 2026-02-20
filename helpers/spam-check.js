@@ -417,6 +417,12 @@ const quickRiskAssessment = (ctx) => {
     signals.push('giveaway_message')
   }
 
+  // 17. Edited message — spammers send clean text then edit to spam
+  // Prevents edited messages from hitting skip/low early exits
+  if (ctx.editedMessage) {
+    signals.push('edited_message')
+  }
+
   // Note: invoice, web_app_data, users_shared, chat_shared are NOT relevant
   // for supergroups - they only occur in private chats with bots
 
@@ -657,10 +663,16 @@ const calculateDynamicThreshold = (context, groupSettings) => {
     baseThreshold -= 10
   }
 
-  // Edited messages - could be spam added after passing initial check
-  // Be more suspicious of edits from users with few messages
-  if (context.isEditedMessage && context.messageCount <= 5) {
-    baseThreshold -= 8
+  // Edited messages - primary evasion tactic: send clean message, then edit to spam
+  // Always be more suspicious of edits, scaled by user history
+  if (context.isEditedMessage) {
+    if (context.messageCount <= 5) {
+      baseThreshold -= 15 // New user editing — very suspicious
+    } else if (context.messageCount <= 20) {
+      baseThreshold -= 10 // Low-history user editing
+    } else {
+      baseThreshold -= 5  // Established user editing — still worth checking
+    }
   }
 
   // ===== BOUNDS =====

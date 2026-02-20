@@ -94,9 +94,16 @@ const handleMyChatMemberUpdates = (ctx, next) => {
  * Coordinates CAS ban and AI spam check
  */
 const spamCheckOrchestrator = async (ctx, next) => {
-  // Only check messages
-  if (!ctx.message || !ctx.from) {
+  // Check both new messages and edited messages
+  // Spammers send clean messages first, then edit them to spam
+  if ((!ctx.message && !ctx.editedMessage) || !ctx.from) {
     return next(ctx)
+  }
+
+  // Normalize ctx.message for edited messages so all downstream code
+  // (CAS ban, spam check, quickRiskAssessment, etc.) works uniformly
+  if (ctx.editedMessage && !ctx.message) {
+    ctx.message = ctx.editedMessage
   }
 
   // Skip if already flagged as spam (e.g., by global ban)
@@ -163,27 +170,49 @@ const registerMiddlewares = (bot, i18n) => {
   bot.use(dataPersistence)
 }
 
+// Explicitly list update types we need — ensures edited_message is always included
+// even if a previous setWebhook/getUpdates call restricted the list
+const ALLOWED_UPDATES = [
+  'message',
+  'edited_message',
+  'callback_query',
+  'my_chat_member',
+  'channel_post',
+  'edited_channel_post'
+]
+
 /**
  * Launch bot in webhook or polling mode
  */
 const launchBot = (bot) => {
   if (process.env.BOT_DOMAIN) {
+    const hookPath = `/LyAdminBot:${process.env.BOT_TOKEN}`
+    const port = process.env.WEBHOOK_PORT || 2200
     return bot.launch({
       webhook: {
         domain: process.env.BOT_DOMAIN,
-        hookPath: `/LyAdminBot:${process.env.BOT_TOKEN}`,
-        port: process.env.WEBHOOK_PORT || 2200
+        hookPath,
+        port
       }
+    }).then(() => {
+      // Re-set webhook with explicit allowed_updates (launch() doesn't pass it)
+      const domain = process.env.BOT_DOMAIN.replace(/^https?:\/\//, '')
+      return bot.telegram.setWebhook(`https://${domain}${hookPath}`, {
+        allowed_updates: ALLOWED_UPDATES
+      })
     }).then(() => {
       botLog.info({
         mode: 'webhook',
-        port: process.env.WEBHOOK_PORT || 2200
+        port,
+        allowedUpdates: ALLOWED_UPDATES
       }, 'Bot started')
     })
   }
 
-  return bot.launch().then(() => {
-    botLog.info({ mode: 'polling' }, 'Bot started')
+  return bot.launch({
+    polling: { allowedUpdates: ALLOWED_UPDATES }
+  }).then(() => {
+    botLog.info({ mode: 'polling', allowedUpdates: ALLOWED_UPDATES }, 'Bot started')
   })
 }
 

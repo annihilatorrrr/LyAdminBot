@@ -167,8 +167,10 @@ const formatUserDetails = (user) => {
 module.exports = async (ctx) => {
   // Handle both new messages and edited messages
   // Edited messages can be used to bypass spam detection (send clean, edit to spam)
-  const message = ctx.message || ctx.editedMessage
+  // Note: ctx.message is normalized in spamCheckOrchestrator (bot.js) so
+  // ctx.message is always set, even for edits
   const isEditedMessage = !!ctx.editedMessage
+  const message = ctx.message
 
   // Skip if not in a group chat or no user
   if (!ctx.chat || !['supergroup', 'group'].includes(ctx.chat.type) || !ctx.from) {
@@ -285,7 +287,9 @@ module.exports = async (ctx) => {
   // Check number of messages from the user (or force check in test mode)
   // For channel posts, always check (no member history to base decision on)
   const messageCount = (ctx.group.members[senderId] && ctx.group.members[senderId].stats && ctx.group.members[senderId].stats.messagesCount) || 0
-  const shouldCheckSpam = isTestMode || isChannelPost || messageCount <= checkLimit
+  // Always check edited messages regardless of message count —
+  // spammers send clean messages first, then edit them to spam after passing the gate
+  const shouldCheckSpam = isTestMode || isChannelPost || isEditedMessage || messageCount <= checkLimit
 
   // Log when using non-default check limit
   if (checkLimit !== 5 && shouldCheckSpam && !isChannelPost) {
