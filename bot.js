@@ -101,9 +101,11 @@ const spamCheckOrchestrator = async (ctx, next) => {
   }
 
   // Normalize ctx.message for edited messages so all downstream code
-  // (CAS ban, spam check, quickRiskAssessment, etc.) works uniformly
+  // (CAS ban, spam check, quickRiskAssessment, etc.) works uniformly.
+  // Must set ctx.update.message (not ctx.message) because Telegraf v3
+  // defines ctx.message as a read-only getter for ctx.update.message
   if (ctx.editedMessage && !ctx.message) {
-    ctx.message = ctx.editedMessage
+    ctx.update.message = ctx.update.edited_message
   }
 
   // Skip if already flagged as spam (e.g., by global ban)
