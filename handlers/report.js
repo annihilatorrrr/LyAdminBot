@@ -55,7 +55,7 @@ const trackReport = (userId) => {
 const handleReport = async (ctx) => {
   // Must be in a group
   if (!ctx.chat || !['group', 'supergroup'].includes(ctx.chat.type)) {
-    return ctx.reply(ctx.i18n.t('report.only_group'))
+    return ctx.replyWithHTML(ctx.i18n.t('report.only_group'))
   }
 
   // Must have a sender (not a service message)
@@ -66,7 +66,7 @@ const handleReport = async (ctx) => {
   // Must be a reply to a message
   const replyMsg = ctx.message && ctx.message.reply_to_message
   if (!replyMsg) {
-    return ctx.reply(ctx.i18n.t('report.need_reply'))
+    return ctx.replyWithHTML(ctx.i18n.t('report.need_reply'))
   }
 
   // Check if this is a channel post
@@ -76,14 +76,14 @@ const handleReport = async (ctx) => {
 
   // Can't report anonymous admins
   if (isAnonymousAdmin) {
-    return ctx.reply(ctx.i18n.t('report.cant_report_admin'))
+    return ctx.replyWithHTML(ctx.i18n.t('report.cant_report_admin'))
   }
 
   // Can't report linked channel (discussion channel attached to the group)
   const linkedChatId = ctx.group && ctx.group.info && ctx.group.info.linked_chat_id
   const isLinkedChannel = replyMsg.is_automatic_forward || (linkedChatId && senderChat && senderChat.id === linkedChatId)
   if (isLinkedChannel) {
-    return ctx.reply(ctx.i18n.t('report.cant_report_admin'))
+    return ctx.replyWithHTML(ctx.i18n.t('report.cant_report_admin'))
   }
 
   // For channel posts, use sender_chat; for regular messages, use from
@@ -92,24 +92,24 @@ const handleReport = async (ctx) => {
 
   // Validate we have a valid target
   if (!targetUser || !targetId) {
-    return ctx.reply(ctx.i18n.t('report.invalid_target'))
+    return ctx.replyWithHTML(ctx.i18n.t('report.invalid_target'))
   }
 
   // Can't report bots or self (only for non-channel posts)
   if (!isChannelPost) {
     if (!targetUser || targetUser.is_bot) {
-      return ctx.reply(ctx.i18n.t('report.cant_report_bot'))
+      return ctx.replyWithHTML(ctx.i18n.t('report.cant_report_bot'))
     }
 
     if (targetId === ctx.from.id) {
-      return ctx.reply(ctx.i18n.t('report.cant_report_self'))
+      return ctx.replyWithHTML(ctx.i18n.t('report.cant_report_self'))
     }
 
     // Can't report admins
     try {
       const targetMember = await ctx.telegram.getChatMember(ctx.chat.id, targetId)
       if (targetMember && ['creator', 'administrator'].includes(targetMember.status)) {
-        return ctx.reply(ctx.i18n.t('report.cant_report_admin'))
+        return ctx.replyWithHTML(ctx.i18n.t('report.cant_report_admin'))
       }
     } catch (e) {
       // User might have left - continue anyway
@@ -119,13 +119,13 @@ const handleReport = async (ctx) => {
   // Check rate limit
   const waitTime = isRateLimited(ctx.from.id)
   if (waitTime) {
-    return ctx.reply(ctx.i18n.t('report.rate_limited', { seconds: waitTime }))
+    return ctx.replyWithHTML(ctx.i18n.t('report.rate_limited', { seconds: waitTime }))
   }
 
   // Check if spam check is enabled
   const spamSettings = getSpamSettings(ctx)
   if (!spamSettings || !spamSettings.enabled) {
-    return ctx.reply(ctx.i18n.t('report.spam_check_disabled'))
+    return ctx.replyWithHTML(ctx.i18n.t('report.spam_check_disabled'))
   }
 
   // Track this report
@@ -134,11 +134,11 @@ const handleReport = async (ctx) => {
   // Get message text
   const messageText = replyMsg.text || replyMsg.caption || ''
   if (!messageText && !replyMsg.photo) {
-    return ctx.reply(ctx.i18n.t('report.no_content'))
+    return ctx.replyWithHTML(ctx.i18n.t('report.no_content'))
   }
 
   // Send "analyzing" message
-  const statusMsg = await ctx.reply(ctx.i18n.t('report.analyzing'))
+  const statusMsg = await ctx.replyWithHTML(ctx.i18n.t('report.analyzing'))
 
   try {
     // Fetch or create target user info from database (skip for channels - they're not users)
