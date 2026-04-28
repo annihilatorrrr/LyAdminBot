@@ -16,6 +16,7 @@ const handler = require('../handlers/chat-member')
 
 const makeCtx = ({ chatId = -100500, update }) => {
   const userUpdates = []
+  const groupUpdates = []
   const modLogs = []
   return {
     ctx: {
@@ -24,9 +25,18 @@ const makeCtx = ({ chatId = -100500, update }) => {
       group: { info: { id: chatId } },
       db: {
         User: {
+          // applyAdminOverride reads the user to compute reputation status;
+          // null is fine — the helper falls back to score=50 + empty stats.
+          findOne: async () => null,
           updateOne: async (query, op) => {
             userUpdates.push({ query, op })
             return { matchedCount: 1 }
+          }
+        },
+        Group: {
+          updateOne: async (query, op) => {
+            groupUpdates.push({ query, op })
+            return { modifiedCount: 1 }
           }
         },
         GroupMember: {
@@ -41,6 +51,7 @@ const makeCtx = ({ chatId = -100500, update }) => {
       }
     },
     userUpdates,
+    groupUpdates,
     modLogs
   }
 }
@@ -96,9 +107,12 @@ const mkUpdate = ({
     assert.strictEqual(modLogs.length, 0, 'case2: bot-driven ban must not log')
   }
 
-  // Case 3: unban (kicked → left) pulls chatId but keeps distinctAdminsBanned.
+  // Case 3: unban (kicked → left) pulls chatId but keeps distinctAdminsBanned,
+  // AND triggers applyAdminOverride → user goes into per-chat trustedUsers.
+  // This is the "разбан кнопкою адміна / Telegram UI" path — without trust
+  // the user's next message gets re-banned by the spam pipeline.
   {
-    const { ctx, userUpdates, modLogs } = makeCtx({
+    const { ctx, userUpdates, groupUpdates, modLogs } = makeCtx({
       update: mkUpdate({ oldStatus: 'kicked', newStatus: 'left' })
     })
     await handler(ctx)
@@ -107,13 +121,35 @@ const mkUpdate = ({
     assert.strictEqual(op.$addToSet, undefined, 'case3: unban must not addToSet admin')
     assert.strictEqual(op.$inc, undefined, 'case3: unban does not increment')
     assert.strictEqual(modLogs[0]?.eventType, 'external_unban')
+    // applyAdminOverride mutations: 1× Group ($addToSet trustedUsers) and
+    // 2× User (reputation+manualUnbans+drop globalBan; spamDetections--).
+    const trustOp = groupUpdates.find(g => g.op.$addToSet?.['settings.openaiSpamCheck.trustedUsers'] === 777)
+    assert.ok(trustOp, 'case3: external unban must add user to per-chat trustedUsers')
+    assert.strictEqual(trustOp.query.group_id, -100500)
+    const repOp = userUpdates.find(u => u.op.$set?.['reputation.score'] !== undefined)
+    assert.ok(repOp, 'case3: external unban must boost reputation')
+    assert.ok(repOp.op.$inc?.['globalStats.manualUnbans'] === 1, 'case3: manualUnbans++')
+    assert.ok(repOp.op.$unset?.isGlobalBanned === 1, 'case3: globalBan dropped')
+  }
+
+  // Case 3b: unrestrict (restricted → member) is also a clean lift → trust.
+  {
+    const { ctx, groupUpdates } = makeCtx({
+      update: mkUpdate({ oldStatus: 'restricted', newStatus: 'member' })
+    })
+    await handler(ctx)
+    const trustOp = groupUpdates.find(g => g.op.$addToSet?.['settings.openaiSpamCheck.trustedUsers'] === 777)
+    assert.ok(trustOp, 'case3b: external unrestrict must add user to trustedUsers')
   }
 
   // Case 4: restrict → ban (escalation) clears restrictedInChats AND emits
   // TWO ModLog rows — one per transition — so the audit log reflects the
   // full state change, not just the dominant one.
+  // CRITICAL: this also flips wasUnrestricted=true alongside becameBanned —
+  // the trust-on-lift path MUST guard against this, otherwise we'd whitelist
+  // a user mid-ban.
   {
-    const { ctx, userUpdates, modLogs } = makeCtx({
+    const { ctx, userUpdates, groupUpdates, modLogs } = makeCtx({
       update: mkUpdate({ oldStatus: 'restricted', newStatus: 'kicked' })
     })
     await handler(ctx)
@@ -124,6 +160,8 @@ const mkUpdate = ({
     const eventTypes = modLogs.map((m) => m.eventType).sort()
     assert.deepStrictEqual(eventTypes, ['external_ban', 'external_unrestrict'].sort(),
       'case4: both ban and unrestrict must be logged — otherwise audit loses half the transition')
+    assert.strictEqual(groupUpdates.length, 0,
+      'case4: escalation must NOT trust the user (becameBanned guard)')
   }
 
   // Case 5: member → restricted → record restrict (not ban).
@@ -164,7 +202,7 @@ const mkUpdate = ({
     assert.strictEqual(modLogs.length, 0)
   }
 
-  console.log('chat-member external-mod regression: all 7 cases OK')
+  console.log('chat-member external-mod regression: all cases OK')
 })().catch((err) => {
   console.error(err)
   process.exit(1)

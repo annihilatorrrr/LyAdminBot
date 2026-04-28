@@ -29,6 +29,7 @@
 
 const { spam: spamLog } = require('../helpers/logger')
 const { logModEvent } = require('../helpers/mod-log')
+const { applyAdminOverride } = require('../helpers/admin-override')
 
 const VISIBLE_STATES = new Set(['member', 'restricted', 'administrator', 'creator'])
 const INVISIBLE_STATES = new Set(['left', 'kicked', 'banned'])
@@ -177,6 +178,27 @@ const recordExternalModeration = async (ctx, update, user, oldStatus, newStatus)
     newStatus,
     events
   }, 'external moderation mirrored')
+
+  // Mirror admin's "this user is OK here" intent into the same data-layer
+  // side-effects bot-button paths (spam-vote, mod-event undo) already apply.
+  // Without this, a Telegram-native unban left score=10 and the user kept
+  // bouncing off the spam pipeline on the next message — same cascade we
+  // fixed for the compact card. Per-chat trustedUsers is the load-bearing
+  // bit; reputation cap=74 keeps single-click escalation to global trust
+  // impossible. Best-effort: failure here is non-fatal, the mirror above
+  // already succeeded and is what cross-chat rules read.
+  //
+  // Escalation guard: `restricted → kicked` flips both wasUnrestricted=true
+  // AND becameBanned=true. We must NOT trust a user mid-ban — only the
+  // "lift" direction qualifies, i.e. user actually ended up in a clean
+  // state, not in a different penalty bucket.
+  const isCleanLift = (wasUnbanned || wasUnrestricted) && !becameBanned && !becameRestricted
+  if (isCleanLift && ctx.db) {
+    await applyAdminOverride(ctx.db, { userId: user.id, chatId })
+      .catch(err => spamLog.warn({
+        err, chatId, userId: user.id
+      }, 'external unban: applyAdminOverride failed'))
+  }
 }
 
 module.exports = async (ctx) => {

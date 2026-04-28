@@ -6,6 +6,7 @@ const { isSenderAdmin } = require('../helpers/is-sender-admin')
 const { replyHTML } = require('../helpers/reply-html')
 const modEvent = require('../helpers/mod-event')
 const { logModEvent } = require('../helpers/mod-log')
+const { applyAdminOverride } = require('../helpers/admin-override')
 const policy = require('../helpers/cleanup-policy')
 const { renderPicker } = require('../helpers/menu/screens/mod-ban-picker')
 const { sendRightsCard } = require('../helpers/menu/screens/mod-rights')
@@ -439,6 +440,17 @@ module.exports = async (ctx) => {
       }
       const errorKey = mapTelegramError(error, 'banan')
       return ctx.replyWithHTML(ctx.i18n.t(errorKey))
+    }
+    // Same data-layer side-effects as the bot-button override paths
+    // (spam-vote, mod-event undo): per-chat whitelist + reputation boost
+    // capped at 74 + drop globalBan. Without this the very next message
+    // re-trips the spam pipeline. Best-effort: Telegram-side lift already
+    // succeeded above, this is enrichment.
+    if (ctx.db && banUser.id > 0) {
+      await applyAdminOverride(ctx.db, {
+        userId: banUser.id,
+        chatId: ctx.chat.id
+      }).catch(() => {})
     }
     banMember.banan.time = Date.now()
     return banMember.save()
