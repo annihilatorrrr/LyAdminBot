@@ -1586,6 +1586,27 @@ CHANNEL COMMENTS (context.channel_comment present):
   push promo). Do NOT treat the channel name or the presence of the
   auto-forward as a spam signal on its own — it's just the comment shape.
 
+POSTING AS CHANNEL (context.sender.posted_as === "channel"):
+- This is Telegram's "Send as Channel" feature: a real human is posting
+  through their channel persona, so Telegram hides the human identity and
+  fills ctx.from with a placeholder system account (display name often
+  "Channel" / username "Channel_Bot", id 136817688). The placeholder is
+  NOT a bot account, NOT a new user, and NOT the author — it is a Telegram
+  API artefact. context.sender.username/bio/language_code/is_premium are
+  intentionally null for this reason.
+- The authoritative author identity is context.sender.channel
+  ({ title, username }). Judge spamminess by the channel persona and the
+  message content, NEVER by the "Channel_Bot" placeholder.
+- Do NOT phrase the verdict as "new bot account", "Channel_Bot posting",
+  or similar — that misrepresents the situation. Phrase it as e.g.
+  "user posting as channel <title>" or "channel <title> commenting".
+- is_first_message_in_this_group=true here means "first message from this
+  channel persona in this group", which is still a weak novelty signal but
+  much weaker than first-message-from-a-fresh-human-account. Weight it
+  accordingly: a brand-new throwaway channel name pushing an unrelated URL
+  in a comment is still classic promo spam; an established public channel
+  reacting on-topic is normal participation.
+
 A casual-sounding first message from a profile with 2+ structural red flags
 above is usually weaponised. Do not anchor on surface "friendliness".
 
@@ -1712,10 +1733,17 @@ SECURITY CANARY
       thread_id: message.message_thread_id || null
     },
     sender: {
-      username: ctx.from?.username || null,
-      is_premium: Boolean(ctx.from?.is_premium),
-      language_code: ctx.from?.language_code || null,
-      bio: userBio ? userBio.substring(0, 300) : null,
+      // posted_as=channel: a real user is speaking through their channel
+      // persona (Telegram "Send as Channel"). ctx.from in that case is the
+      // technical Channel_Bot placeholder (id=136817688), NOT the human —
+      // surfacing its username/bio/premium flag would tell the model
+      // "Channel_Bot" is the author and trick it into "new bot account".
+      // Authoritative identity for these messages lives in `channel`.
+      posted_as: userContext.isChannelPost ? 'channel' : 'user',
+      username: userContext.isChannelPost ? null : (ctx.from?.username || null),
+      is_premium: userContext.isChannelPost ? false : Boolean(ctx.from?.is_premium),
+      language_code: userContext.isChannelPost ? null : (ctx.from?.language_code || null),
+      bio: userContext.isChannelPost ? null : (userBio ? userBio.substring(0, 300) : null),
       // is_new_account = Telegram account ID indicates registration < ~6 mo
       is_new_account: Boolean(userContext.isNewAccount),
       // The two counts BELOW include the message currently being analyzed
